@@ -35,7 +35,7 @@ public class YoloProcessingService {
     @Value("${app.python.script.path:python_scripts/yolo_processor.py}")
     private String pythonScriptPath;
 
-    public DetectionResult saveUploadedFile(MultipartFile file) throws IOException {
+    public DetectionResult saveUploadedFile(MultipartFile file, String cameraId) throws IOException {
         // Create upload directory if it doesn't exist
         Path uploadPath = Paths.get(uploadDir);
         if (!Files.exists(uploadPath)) {
@@ -74,6 +74,7 @@ public class YoloProcessingService {
         result.setStatus("PENDING");
         result.setWidth(width);
         result.setHeight(height);
+        result.setCameraId(cameraId);
 
         return repository.save(result);
     }

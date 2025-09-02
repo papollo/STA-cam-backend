@@ -25,11 +25,23 @@ public class DetectionController {
 
     @PostMapping("/upload")
     public ResponseEntity<Map<String, Object>> uploadFile(
-            @RequestParam("file") MultipartFile file) {
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("cameraId") String cameraId) {
 
         Map<String, Object> response = new HashMap<>();
 
         try {
+            // Validate camera ID
+            if (cameraId == null || cameraId.trim().isEmpty()) {
+                response.put("error", "Camera ID is required");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            if (!isValidCameraId(cameraId)) {
+                response.put("error", "Invalid camera ID. Must be 'camera_one' or 'camera_two'");
+                return ResponseEntity.badRequest().body(response);
+            }
+
             // Validate file
             if (file.isEmpty()) {
                 response.put("error", "File is empty");
@@ -43,8 +55,8 @@ public class DetectionController {
                 return ResponseEntity.badRequest().body(response);
             }
 
-            // Save uploaded file
-            DetectionResult detectionResult = yoloProcessingService.saveUploadedFile(file);
+            // Save uploaded file with camera information
+            DetectionResult detectionResult = yoloProcessingService.saveUploadedFile(file, cameraId);
 
             // Start YOLO processing asynchronously
             yoloProcessingService.processWithYolo(detectionResult);
@@ -53,14 +65,15 @@ public class DetectionController {
             response.put("message", "File uploaded successfully and processing started");
             response.put("detectionId", detectionResult.getId());
             response.put("fileName", detectionResult.getFileName());
+            response.put("cameraId", detectionResult.getCameraId());
             response.put("status", detectionResult.getStatus());
 
-            log.info("File uploaded successfully: {}", fileName);
+            log.info("File uploaded successfully from {}: {}", cameraId, fileName);
 
             return ResponseEntity.ok(response);
 
         } catch (Exception e) {
-            log.error("Error uploading file", e);
+            log.error("Error uploading file from camera {}", cameraId, e);
             response.put("error", "Failed to upload file: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
         }
@@ -110,5 +123,9 @@ public class DetectionController {
             case "jpg", "jpeg", "png", "gif", "bmp", "mp4", "avi", "mov", "wmv", "mkv" -> true;
             default -> false;
         };
+    }
+
+    private boolean isValidCameraId(String cameraId) {
+        return "camera_one".equals(cameraId) || "camera_two".equals(cameraId);
     }
 }

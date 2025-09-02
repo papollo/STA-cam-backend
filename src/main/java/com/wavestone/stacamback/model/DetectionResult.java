@@ -42,6 +42,9 @@ public class DetectionResult {
     private Integer width; // Image or video width in pixels
     private Integer height; // Image or video height in pixels
 
+    @Column(nullable = false)
+    private String cameraId; // camera_one or camera_two
+
     @PrePersist
     protected void onCreate() {
         processedAt = LocalDateTime.now();
