@@ -5,6 +5,8 @@ import com.wavestone.stacamback.model.DetectionResult;
 import com.wavestone.stacamback.repository.DetectionResultRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jcodec.api.FrameGrab;
+import org.jcodec.common.io.NIOUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -12,7 +14,10 @@ import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -63,7 +68,16 @@ public class YoloProcessingService {
                 log.warn("Could not read image dimensions for file: {}", fileName);
             }
         } else if (fileType.equals("VIDEO")) {
-            // TODO: Extract video dimensions using a suitable library (e.g., Xuggler, JCodec, etc.)
+            try {
+                // Extract video dimensions using JCodec
+                String[] dimensions = getVideoDimensionsWithJCodec(filePath.toString());
+                if (dimensions != null && dimensions.length == 2) {
+                    width = Integer.parseInt(dimensions[0]);
+                    height = Integer.parseInt(dimensions[1]);
+                }
+            } catch (Exception e) {
+                log.warn("Could not read video dimensions for file: {}", fileName);
+            }
         }
 
         // Create detection result record
@@ -96,7 +110,7 @@ public class YoloProcessingService {
                 for (String pythonCmd : pythonCommands) {
                     try {
                         processBuilder = new ProcessBuilder(
-                            pythonCmd, pythonScriptPath, detectionResult.getFilePath()
+                                pythonCmd, pythonScriptPath, detectionResult.getFilePath()
                         );
                         processBuilder.redirectErrorStream(true);
 
@@ -128,7 +142,7 @@ public class YoloProcessingService {
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(process.getInputStream()));
                      BufferedReader errorReader = new BufferedReader(
-                        new InputStreamReader(process.getErrorStream()))) {
+                             new InputStreamReader(process.getErrorStream()))) {
 
                     String line;
                     while ((line = reader.readLine()) != null) {
@@ -163,8 +177,8 @@ public class YoloProcessingService {
                 } else {
                     detectionResult.setStatus("FAILED");
                     String errorMessage = "Python script failed with exit code: " + exitCode +
-                                        "\nStdout: " + output.toString() +
-                                        "\nStderr: " + errorOutput.toString();
+                            "\nStdout: " + output.toString() +
+                            "\nStderr: " + errorOutput.toString();
                     detectionResult.setErrorMessage(errorMessage);
                     log.error("YOLO processing failed for file: {} - {}", detectionResult.getFileName(), errorMessage);
                 }
@@ -237,6 +251,39 @@ public class YoloProcessingService {
             return rawOutput.substring(firstBrace, lastBrace + 1);
         }
 
+        return null;
+    }
+
+    /**
+     * Get video dimensions using JCodec (Pure Java solution)
+     *
+     * @param filePath Path to the video file
+     * @return Array with width and height as strings, or null if extraction fails
+     */
+    private String[] getVideoDimensionsWithJCodec(String filePath) {
+        try {
+            // Use JCodec to read video metadata
+            File videoFile = new File(filePath);
+            FrameGrab grab = FrameGrab.createFrameGrab(NIOUtils.readableChannel(videoFile));
+
+            // Get video track metadata
+            org.jcodec.common.DemuxerTrackMeta trackMeta = grab.getVideoTrack().getMeta();
+
+            // Get video dimensions from track metadata
+            if (trackMeta != null) {
+                // JCodec stores dimensions in the track metadata differently
+                org.jcodec.common.model.Size size = trackMeta.getVideoCodecMeta().getSize();
+
+                if (size != null) {
+                    String width = String.valueOf(size.getWidth());
+                    String height = String.valueOf(size.getHeight());
+                    log.info("JCodec extracted video dimensions: {}x{}", width, height);
+                    return new String[]{width, height};
+                }
+            }
+        } catch (Exception e) {
+            log.error("Failed to extract video dimensions using JCodec for file: {}", filePath, e);
+        }
         return null;
     }
 }
