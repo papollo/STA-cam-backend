@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLO Detection System</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .upload-section {
+            border: 2px dashed #ccc;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .results-section {
+            margin-top: 30px;
+        }
+        .detection-item {
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .live-feed {
+            background-color: #f5f5f5;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .status {
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+        .status.pending { background-color: #fff3cd; color: #856404; }
+        .status.processing { background-color: #d1ecf1; color: #0c5460; }
+        .status.completed { background-color: #d4edda; color: #155724; }
+        .status.failed { background-color: #f8d7da; color: #721c24; }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .detection-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>YOLO v10 Detection System</h1>
+
+    <!-- Live Feed Status -->
+    <div class="live-feed">
+        <h3>Live Feed Status: <span id="connectionStatus">Disconnected</span></h3>
+        <p>Real-time detection updates will appear here when connected.</p>
+    </div>
+
+    <!-- File Upload Section -->
+    <div class="upload-section">
+        <h2>Upload Image or Video</h2>
+        <input type="file" id="fileInput" accept="image/*,video/*" style="margin: 10px;">
+        <br>
+        <button onclick="uploadFile()">Upload and Process</button>
+        <div id="uploadStatus" style="margin-top: 15px;"></div>
+    </div>
+
+    <!-- Results Section -->
+    <div class="results-section">
+        <h2>Detection Results</h2>
+        <button onclick="loadRecentResults()">Refresh Results</button>
+        <div id="results" class="detection-list"></div>
+    </div>
+
+    <script>
+        let stompClient = null;
+        const API_BASE = 'http://localhost:8080';
+
+        // Initialize WebSocket connection
+        function connectWebSocket() {
+            const socket = new SockJS(API_BASE + '/ws');
+            stompClient = Stomp.over(socket);
+
+            stompClient.connect({}, function(frame) {
+                document.getElementById('connectionStatus').textContent = 'Connected';
+                console.log('Connected: ' + frame);
+
+                // Subscribe to detection updates
+                stompClient.subscribe('/topic/detections', function(message) {
+                    const detection = JSON.parse(message.body);
+                    displayLiveDetection(detection);
+                });
+
+                // Subscribe to initial data
+                stompClient.subscribe('/topic/detections/initial', function(message) {
+                    const detections = JSON.parse(message.body);
+                    displayResults(detections);
+                });
+
+                // Request initial data
+                stompClient.send("/app/subscribe", {}, {});
+
+            }, function(error) {
+                document.getElementById('connectionStatus').textContent = 'Connection Failed';
+                console.log('Connection error: ' + error);
+            });
+        }
+
+        // Upload file function
+        function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                alert('Please select a file');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            document.getElementById('uploadStatus').innerHTML = 'Uploading...';
+
+            fetch(API_BASE + '/api/detection/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById('uploadStatus').innerHTML =
+                        `✅ File uploaded successfully! Detection ID: ${data.detectionId}`;
+                    fileInput.value = '';
+                    setTimeout(loadRecentResults, 1000);
+                } else {
+                    document.getElementById('uploadStatus').innerHTML =
+                        `❌ Upload failed: ${data.error}`;
+                }
+            })
+            .catch(error => {
+                document.getElementById('uploadStatus').innerHTML =
+                    `❌ Upload failed: ${error.message}`;
+            });
+        }
+
+        // Load recent results
+        function loadRecentResults() {
+            fetch(API_BASE + '/api/detection/results')
+            .then(response => response.json())
+            .then(data => {
+                displayResults(data);
+            })
+            .catch(error => {
+                console.error('Error loading results:', error);
+            });
+        }
+
+        // Display results
+        function displayResults(detections) {
+            const resultsDiv = document.getElementById('results');
+
+            if (!detections || detections.length === 0) {
+                resultsDiv.innerHTML = '<p>No detection results yet.</p>';
+                return;
+            }
+
+            let html = '';
+            detections.forEach(detection => {
+                const detectionsData = detection.detections ? JSON.parse(detection.detections) : [];
+
+                html += `
+                    <div class="detection-item">
+                        <h4>${detection.fileName}</h4>
+                        <p><strong>Type:</strong> ${detection.fileType}</p>
+                        <p><strong>Status:</strong> <span class="status ${detection.status.toLowerCase()}">${detection.status}</span></p>
+                        <p><strong>Processed:</strong> ${new Date(detection.processedAt).toLocaleString()}</p>
+
+                        ${detectionsData && detectionsData.detections ? `
+                            <p><strong>Objects Found:</strong> ${detectionsData.detections.length}</p>
+                            <div style="margin-left: 20px;">
+                                ${detectionsData.detections.map(det => `
+                                    <div style="margin: 5px 0; padding: 5px; background: #f8f9fa; border-radius: 3px;">
+                                        ${det.className} (${(det.confidence * 100).toFixed(1)}%)
+                                    </div>
+                                `).join('')}
+                            </div>
+                        ` : ''}
+
+                        ${detection.errorMessage ? `
+                            <p style="color: red;"><strong>Error:</strong> ${detection.errorMessage}</p>
+                        ` : ''}
+                    </div>
+                `;
+            });
+
+            resultsDiv.innerHTML = html;
+        }
+
+        // Display live detection update
+        function displayLiveDetection(detection) {
+            // Add a visual notification for new detections
+            const liveFeed = document.querySelector('.live-feed');
+            const notification = document.createElement('div');
+            notification.style.cssText = 'background: #28a745; color: white; padding: 10px; margin: 5px 0; border-radius: 3px;';
+            notification.innerHTML = `🔴 LIVE: ${detection.fileName} - ${detection.status}`;
+
+            liveFeed.appendChild(notification);
+
+            // Remove notification after 5 seconds
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.parentNode.removeChild(notification);
+                }
+            }, 5000);
+
+            // Refresh results to show updated data
+            loadRecentResults();
+        }
+
+        // Initialize the page
+        window.onload = function() {
+            connectWebSocket();
+            loadRecentResults();
+        };
+
+        // Reconnect WebSocket if connection is lost
+        window.addEventListener('beforeunload', function() {
+            if (stompClient !== null) {
+                stompClient.disconnect();
+            }
+        });
+    </script>
+</body>
+</html>
+
