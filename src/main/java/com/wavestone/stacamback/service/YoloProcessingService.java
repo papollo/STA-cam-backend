@@ -2,6 +2,7 @@ package com.wavestone.stacamback.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wavestone.stacamback.model.DetectionResult;
+import com.wavestone.stacamback.model.WebSocketDetectionResponse;
 import com.wavestone.stacamback.repository.DetectionResultRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -15,20 +16,20 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.Base64;
 
 @Service
 @RequiredArgsConstructor
@@ -44,6 +45,18 @@ public class YoloProcessingService {
 
     @Value("${app.python.script.path:python_scripts/yolo_processor.py}")
     private String pythonScriptPath;
+
+    @Value("${app.websocket.image.max-width:800}")
+    private int maxImageWidth;
+
+    @Value("${app.websocket.image.max-height:600}")
+    private int maxImageHeight;
+
+    @Value("${app.websocket.image.quality:0.7}")
+    private float imageQuality;
+
+    @Value("${app.websocket.image.enabled:true}")
+    private boolean imageWebSocketEnabled;
 
     public DetectionResult saveUploadedFile(MultipartFile file, String cameraId) throws IOException {
         // Create upload directory if it doesn't exist
@@ -238,9 +251,148 @@ public class YoloProcessingService {
 
     private void broadcastDetectionUpdate(DetectionResult result) {
         try {
-            messagingTemplate.convertAndSend("/topic/detections", result);
+            WebSocketDetectionResponse response = new WebSocketDetectionResponse(result);
+            
+            // Add image data if it's an image file and processing is completed
+            if ("IMAGE".equals(result.getFileType()) && "COMPLETED".equals(result.getStatus())) {
+                try {
+                    String imageBase64 = convertImageToBase64(result.getFilePath());
+                    String mimeType = getMimeTypeFromFileName(result.getFileName());
+                    
+                    response.setImageBase64(imageBase64);
+                    response.setMimeType(mimeType);
+                } catch (Exception e) {
+                    log.warn("Could not convert image to Base64 for file: {}", result.getFileName(), e);
+                }
+            }
+            
+            messagingTemplate.convertAndSend("/topic/detections", response);
         } catch (Exception e) {
             log.error("Failed to broadcast detection update", e);
+        }
+    }
+
+    /**
+     * Convert image file to compressed Base64 string with resizing and quality control
+     */
+    private String convertImageToBase64(String filePath) throws IOException {
+        if (!imageWebSocketEnabled) {
+            return null; // Skip image processing if disabled
+        }
+
+        try {
+            // Read the original image
+            BufferedImage originalImage = ImageIO.read(new File(filePath));
+            if (originalImage == null) {
+                throw new IOException("Could not read image file: " + filePath);
+            }
+
+            // Resize image if it's too large
+            BufferedImage resizedImage = resizeImageIfNeeded(originalImage);
+
+            // Compress the image to reduce size
+            byte[] compressedImageBytes = compressImage(resizedImage);
+
+            // Convert to Base64
+            String base64 = Base64.getEncoder().encodeToString(compressedImageBytes);
+
+            log.debug("Image conversion: Original size ~{}KB, Compressed size ~{}KB, Compression ratio: {:.2f}%",
+                    Files.size(Paths.get(filePath)) / 1024,
+                    compressedImageBytes.length / 1024,
+                    (double) compressedImageBytes.length / Files.size(Paths.get(filePath)) * 100);
+
+            return base64;
+        } catch (Exception e) {
+            log.error("Failed to convert and compress image: {}", filePath, e);
+            throw new IOException("Image conversion failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Resize image if it exceeds maximum dimensions
+     */
+    private BufferedImage resizeImageIfNeeded(BufferedImage originalImage) {
+        int originalWidth = originalImage.getWidth();
+        int originalHeight = originalImage.getHeight();
+
+        // Check if resizing is needed
+        if (originalWidth <= maxImageWidth && originalHeight <= maxImageHeight) {
+            return originalImage; // No resizing needed
+        }
+
+        // Calculate new dimensions while maintaining aspect ratio
+        double widthRatio = (double) maxImageWidth / originalWidth;
+        double heightRatio = (double) maxImageHeight / originalHeight;
+        double ratio = Math.min(widthRatio, heightRatio);
+
+        int newWidth = (int) (originalWidth * ratio);
+        int newHeight = (int) (originalHeight * ratio);
+
+        // Create resized image with high quality
+        BufferedImage resizedImage = new BufferedImage(newWidth, newHeight, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g2d = resizedImage.createGraphics();
+
+        // Set high-quality rendering hints
+        g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        g2d.drawImage(originalImage, 0, 0, newWidth, newHeight, null);
+        g2d.dispose();
+
+        log.debug("Image resized from {}x{} to {}x{} (ratio: {:.2f})",
+                originalWidth, originalHeight, newWidth, newHeight, ratio);
+
+        return resizedImage;
+    }
+
+    /**
+     * Compress image with specified quality
+     */
+    private byte[] compressImage(BufferedImage image) throws IOException {
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+
+        // Get JPEG writer
+        Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpg");
+        if (!writers.hasNext()) {
+            throw new IOException("No JPEG writer available");
+        }
+
+        ImageWriter writer = writers.next();
+        ImageWriteParam param = writer.getDefaultWriteParam();
+
+        // Set compression quality
+        param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+        param.setCompressionQuality(imageQuality);
+
+        // Write compressed image
+        try (ImageOutputStream imageOutputStream = ImageIO.createImageOutputStream(outputStream)) {
+            writer.setOutput(imageOutputStream);
+            writer.write(null, new javax.imageio.IIOImage(image, null, null), param);
+        } finally {
+            writer.dispose();
+        }
+
+        return outputStream.toByteArray();
+    }
+
+    /**
+     * Get MIME type from file extension
+     */
+    private String getMimeTypeFromFileName(String fileName) {
+        String extension = fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase();
+        switch (extension) {
+            case "jpg":
+            case "jpeg":
+                return "image/jpeg";
+            case "png":
+                return "image/png";
+            case "gif":
+                return "image/gif";
+            case "bmp":
+                return "image/bmp";
+            default:
+                return "image/jpeg"; // Default fallback
         }
     }
 
@@ -424,8 +576,8 @@ public class YoloProcessingService {
                     String frameDetections = processFrameWithYolo(frameFile);
                     long processingTime = System.currentTimeMillis() - startTime;
 
-                    // Broadcast frame result immediately
-                    broadcastFrameUpdate(detectionResult, frameSecond, frameDetections, processingTime);
+                    // Broadcast frame result immediately with image data
+                    broadcastFrameUpdate(detectionResult, frameSecond, frameDetections, processingTime, frameFile);
 
                     successfulFrames++;
                     log.info("Processed frame at {}s for video: {} ({}ms)",
@@ -564,6 +716,39 @@ public class YoloProcessingService {
 
             messagingTemplate.convertAndSend("/topic/detections", message);
             log.debug("Broadcasted frame detection for video {} at {}s", detectionResult.getFileName(), frameSecond);
+        } catch (Exception e) {
+            log.error("Failed to broadcast frame detection", e);
+        }
+    }
+
+    /**
+     * Enhanced broadcast frame update with image data
+     */
+    private void broadcastFrameUpdate(DetectionResult detectionResult, int frameSecond, String detections, long processingTime, String framePath) {
+        try {
+            Map<String, Object> message = new HashMap<>();
+            message.put("type", "FRAME_DETECTION");
+            message.put("videoId", detectionResult.getId());
+            message.put("fileName", detectionResult.getFileName());
+            message.put("cameraId", detectionResult.getCameraId());
+            message.put("frameSecond", frameSecond);
+            message.put("detections", detections);
+            message.put("processingTime", processingTime);
+            message.put("width", detectionResult.getWidth());
+            message.put("height", detectionResult.getHeight());
+            message.put("timestamp", LocalDateTime.now());
+
+            // Add frame image data
+            try {
+                String frameBase64 = convertImageToBase64(framePath);
+                message.put("imageBase64", frameBase64);
+                message.put("mimeType", "image/jpeg");
+            } catch (Exception e) {
+                log.warn("Could not convert frame to Base64: {}", framePath, e);
+            }
+
+            messagingTemplate.convertAndSend("/topic/detections", message);
+            log.debug("Broadcasted frame detection with image for video {} at {}s", detectionResult.getFileName(), frameSecond);
         } catch (Exception e) {
             log.error("Failed to broadcast frame detection", e);
         }
