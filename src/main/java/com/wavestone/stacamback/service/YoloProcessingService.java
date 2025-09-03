@@ -495,24 +495,24 @@ public class YoloProcessingService {
             // Get video metadata for more accurate frame extraction
             double fps = 25.0; // Default fallback, try to get actual FPS if possible
             int frameNumber = 0;
-            int targetFrameInterval = (int) Math.round(fps); // Extract every N frames for 1 second intervals
+            int targetFrameInterval = (int) Math.round(fps / 2.0); // Extract every N frames for 5 fps (0.2 second intervals)
 
-            log.info("Starting frame extraction from video: {} (estimated fps: {})", videoPath, fps);
+            log.info("Starting frame extraction from video: {} (estimated fps: {}, extracting at 5 fps)", videoPath, fps);
 
             Picture picture;
-            while ((picture = grab.getNativeFrame()) != null && frameFiles.size() < 300) { // Limit to 5 minutes max
+            while ((picture = grab.getNativeFrame()) != null && frameFiles.size() < 1500) { // Limit to 5 minutes max at 5 fps
                 frameNumber++;
 
-                // Extract frame at 1-second intervals
+                // Extract frame at 0.2-second intervals (5 fps)
                 if (frameNumber % targetFrameInterval == 0) {
-                    int secondsExtracted = frameNumber / targetFrameInterval;
+                    double secondsExtracted = frameNumber / fps;
 
                     try {
                         // Convert Picture to BufferedImage more efficiently
                         BufferedImage bufferedImage = AWTUtil.toBufferedImage(picture);
 
                         // Create unique frame filename
-                        String frameFileName = String.format("frame_%d_%ds_%d.jpg",
+                        String frameFileName = String.format("frame_%d_%.1fs_%d.jpg",
                                 System.currentTimeMillis(), secondsExtracted, frameNumber);
                         Path framePath = framesDir.resolve(frameFileName);
 
@@ -520,11 +520,11 @@ public class YoloProcessingService {
                         ImageIO.write(bufferedImage, "jpg", framePath.toFile());
                         frameFiles.add(framePath.toString());
 
-                        log.debug("Extracted frame at {}s (frame #{}): {}",
+                        log.debug("Extracted frame at {:.1f}s (frame #{}): {}",
                                 secondsExtracted, frameNumber, frameFileName);
 
                     } catch (Exception e) {
-                        log.warn("Failed to extract frame at {}s: {}", frameNumber / targetFrameInterval, e.getMessage());
+                        log.warn("Failed to extract frame at {:.1f}s: {}", frameNumber / fps, e.getMessage());
                         // Continue with next frame
                     }
                 }
